@@ -1,13 +1,19 @@
 {
   "snapshot_date": "2026-10-28",
-  "status": "PARTIAL_POLICY_ONLY",
-  "scope": "Only synchronization policy is included in this additive batch. Reader template publication is deferred pending reuse review.",
+  "status": "PARTIAL_DOCUMENTATION_ONLY",
+  "scope": "Synchronization policy and source-reuse choices only. No new runtime code or data in this batch.",
   "files": [
     {
       "path": "research/SYNC_POLICY.md",
       "sha256": "569ccafcba21c8746d87c052cbe2b18dd48592dfadb653a607fbbd4d84112f1b",
       "bytes": 1600,
       "git_blob_sha1": "743d65f49511c958c66cbf226108b07e56d4c567"
+    },
+    {
+      "path": "research/REUSE_CHOICES.md",
+      "bytes": 1357,
+      "sha256": "6c298f494d4b68aac80d32279830d2d97d54a48dc6b93e8e1a3bbfc1442eba6f",
+      "git_blob_sha1": "0619866e9f408653da34502668dad4e6f1df24a6"
     }
   ],
   "not_included": [
