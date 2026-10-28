@@ -1,8 +1,17 @@
 {
   "snapshot_date": "2026-10-28",
-  "scope": "additive source-only reader and workflow; not all code or production deployment",
+  "scope": "Partial upload: synchronization policy only; reader source and README remain local pending publication-safe packaging",
   "base_commit": "3c9a53b54d3a382efa416fe5eddb74c17db92d8c",
   "files": [
+    {
+      "path": "research/SYNC_POLICY.md",
+      "source_path": "generated documentation",
+      "sha256": "569ccafcba21c8746d87c052cbe2b18dd48592dfadb653a607fbbd4d84112f1b",
+      "bytes": 1600,
+      "git_blob_sha1": "743d65f49511c958c66cbf226108b07e56d4c567"
+    }
+  ],
+  "planned_files": [
     {
       "path": "research/reader-d27-v4/reader.py",
       "source_path": "research_outputs/state_mother_reader_20261027/reader.py",
@@ -31,5 +40,10 @@
       "bytes": 1277,
       "git_blob_sha1": "6be67c5473580a0ff79f6b142035855419144642"
     }
+  ],
+  "not_uploaded": [
+    "research/reader-d27-v4/README.md",
+    "research/reader-d27-v4/reader.py",
+    "research/reader-d27-v4/test_reader.py"
   ]
 }
