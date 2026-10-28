@@ -19,7 +19,7 @@
 
 以完整symbol为key，各层均保留`status/data_date/asof/source_refs/source_sha256`。
 
-- `industry`：`label/subindustry/concept_tags`，主行业唯一；多概念另列，UNKNOWN不猜。
+- `industry`：`theme_tags[]` 为主分类，采用短线侠细分题材原文多标签（有证据才标机器人等）；每个标签保留来源、日期、原文及证据。`auxiliary_industry` 为 CAPCO 宽行业，仅辅助折叠，不覆盖主主题。`work_status=WAIT_EXTERNAL_CLASSIFICATION` 表示外部 Chat 接手核补，兼容层 status 仍为 PARTIAL/PENDING。未命中部分缓存不等于无主题；200 项宽行业覆盖不等于细分类完成。
 - `chart`：`preselection_date/preselection_evidence`与`outcome_date/outcome_evidence`分开，既有图URL与原51/22证据引用，不重算公式。
 - `research_reports`：`items[{report_date,title,source_ref,page_or_section,explanation,risk}]`；无评分、否决或买入门字段。
 
