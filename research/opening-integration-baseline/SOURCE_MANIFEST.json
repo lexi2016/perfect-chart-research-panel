@@ -1,0 +1,90 @@
+{
+  "schema": "opening-panel-source-manifest.v1",
+  "full_verification_utc": "2026-10-28T08:52:04.715571+00:00",
+  "source_root": "/Users/lexi/Desktop/学习/Z哥方法论/研究面板本地派生_20261027/sites/stock18-workflow/dist",
+  "repository": "lexi2016/perfect-chart-research-panel",
+  "remote_main_commit": "3c9a53b54d3a382efa416fe5eddb74c17db92d8c",
+  "remote_tree": "9a758f34a7840101e82527cabaa0a86a31416623",
+  "verified_base_bundle_commit": "d6c3028820ea8f0ed463bf430fa2848ebc940362",
+  "verified_base_manifest_sha256": "ddc82097e5b67637c30359b5aa365c411cad4142d76f832f4261e58fa52d840f",
+  "verified_remote_receipt_path": "/Users/lexi/Desktop/学习/agents调试/Z哥方法论/perfect-chart-github-remote-receipt-20261028.json",
+  "files": [
+    {
+      "path": "site/daily.html",
+      "source_path": "/Users/lexi/Desktop/学习/Z哥方法论/研究面板本地派生_20261027/sites/stock18-workflow/dist/daily.html",
+      "size_bytes": 9573,
+      "sha256": "039cadf528927a62348fbe14977eeeeb6bb1b8cbeb0b6fbc2baf9878b217902e",
+      "git_blob_sha1": "ee96d19ef01986e6c1daf386ebc0af7f68c780db",
+      "baseline_git_blob_sha1": "28fb6cd7836e0335134df349d78a77aaf3b5554a",
+      "baseline_state": "modified",
+      "source_mtime_ns": 1793162307762047114,
+      "local_source_git_tracking": "not_a_git_checkout"
+    },
+    {
+      "path": "site/daily.js",
+      "source_path": "/Users/lexi/Desktop/学习/Z哥方法论/研究面板本地派生_20261027/sites/stock18-workflow/dist/daily.js",
+      "size_bytes": 14367,
+      "sha256": "43cff4018cf9eb18827760d10306a436241ce55410569e4c4199ecd2766d71ce",
+      "git_blob_sha1": "3582b61077de1edd492b4ebe06bcc830a0d58506",
+      "baseline_git_blob_sha1": "21ccc63ce4942e96c2c2c1ea8c5fba09205a7c45",
+      "baseline_state": "modified",
+      "source_mtime_ns": 1793162212212633688,
+      "local_source_git_tracking": "not_a_git_checkout"
+    },
+    {
+      "path": "site/research28-daily.js",
+      "source_path": "/Users/lexi/Desktop/学习/Z哥方法论/研究面板本地派生_20261027/sites/stock18-workflow/dist/research28-daily.js",
+      "size_bytes": 10119,
+      "sha256": "41c246f9199b554fe2ec2d2ec6cb96a6cbbbc388ede8dd77e59d615844c94790",
+      "git_blob_sha1": "7791b4de10a6b692ab4cbe41b1c8b0e9b81c68f1",
+      "baseline_git_blob_sha1": "d6f3488e5ec64467c2fc2b22f6413be7ea76bd3d",
+      "baseline_state": "modified",
+      "source_mtime_ns": 1793162212213225025,
+      "local_source_git_tracking": "not_a_git_checkout"
+    },
+    {
+      "path": "site/research-days.css",
+      "source_path": "/Users/lexi/Desktop/学习/Z哥方法论/研究面板本地派生_20261027/sites/stock18-workflow/dist/research-days.css",
+      "size_bytes": 6106,
+      "sha256": "e25aac91c3c7cccf0bbd1b87755a6f258849181d82a69373d0ff423ea041fd75",
+      "git_blob_sha1": "dd4321db97520139a37e7bcd6e992bbb40ac1468",
+      "baseline_git_blob_sha1": "568febdb9e632e054428a8f8dd2e0e351b6b0244",
+      "baseline_state": "modified",
+      "source_mtime_ns": 1793162212211918768,
+      "local_source_git_tracking": "not_a_git_checkout"
+    }
+  ],
+  "unchanged_required_dependencies": [
+    {
+      "path": "site/calendar.js",
+      "sha256": "1298d9b90c7524315f8e397c83e6e450fcbe8a186f234f04a965e68855d003bf",
+      "git_blob_sha1": "f0696b79a7b4bb3f43e828add2dd7eb484474fd7",
+      "baseline_git_blob_sha1": "f0696b79a7b4bb3f43e828add2dd7eb484474fd7",
+      "state": "same_as_verified_remote_tree"
+    },
+    {
+      "path": "site/related-reports.js",
+      "sha256": "7bcfb2eb00690149e0497211c73bcc03912c1088a0ab96206b9f0d05dc2696b5",
+      "git_blob_sha1": "dddc812d10e41477a1f933291272f1ae6a77a268",
+      "baseline_git_blob_sha1": "dddc812d10e41477a1f933291272f1ae6a77a268",
+      "state": "same_as_verified_remote_tree"
+    }
+  ],
+  "source_files": 4,
+  "source_bytes": 40165,
+  "allowlist_sha256": "3e1f2808797b8f89deaf0b47cd92d263b572f2b99b83124e5d7ed97dc8f31e53",
+  "source_to_snapshot_all_sha256_equal": true,
+  "credential_shape_findings": [],
+  "not_included": [
+    "research JSON and stock lists",
+    "chart data and images",
+    "PDF and binary files",
+    "entire local dist",
+    "archive data and runtime state"
+  ],
+  "limitations": [
+    "Only the four changed site files are provided; calendar.js and related-reports.js already match the verified main tree.",
+    "Site references to frozen research JSON, archive images/charts, and current API responses require separately authorized resources; those are not supplied.",
+    "Byte and syntax checks do not prove API, UI, data, or natural-slot behavior."
+  ]
+}
