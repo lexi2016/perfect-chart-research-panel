@@ -5,9 +5,9 @@
   "files": [
     {
       "path": "research/SYNC_POLICY.md",
-      "sha256": "569ccafcba21c8746d87c052cbe2b18dd48592dfadb653a607fbbd4d84112f1b",
-      "bytes": 1600,
-      "git_blob_sha1": "743d65f49511c958c66cbf226108b07e56d4c567"
+      "sha256": "09dd5527e2b3a15374a2683ccd9867ef8b9f18f7f128b07730a62d53d506c5da",
+      "bytes": 2975,
+      "git_blob_sha1": "7cdf339054dfe6f1d086f3eba0ca5d447bc7bdc7"
     },
     {
       "path": "research/REUSE_CHOICES.md",
