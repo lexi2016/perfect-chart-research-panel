@@ -1,0 +1,1 @@
+window.STOCK_DATASET_CONFIG={dataUrl:'../live85_data.json',displayUrl:'display126.json',displayRoot:''};

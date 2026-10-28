@@ -1,0 +1,1116 @@
+--- a/infrastructure/zsxq_pdf_ingestion.py
++++ b/infrastructure/zsxq_pdf_ingestion.py
+@@ -849,6 +849,8 @@
+         "processing": {
+             "page_count": page_count,
+             "processed_page_count": len(pages),
++            "verified_pdf_size": pdf_size if verify_pdf else None,
++            "verified_pages_size": len(pages_raw) if verify_pdf else None,
+             "downloaded_at": artifact.get("downloaded_at"),
+             "ocr_started_at": artifact.get("ocr_started_at"),
+             "ocr_completed_at": artifact.get("ocr_completed_at"),
+@@ -876,6 +878,7 @@
+             "path": receipt_path,
+             "sha256": _sha256(receipt_raw),
+             "integrity": "SOURCE_PDF_AND_PAGE_HASHES_VERIFIED" if verify_pdf else "SOURCE_AND_PAGE_HASHES_VERIFIED",
++            "verified_pdf_sha256": artifact.get("pdf_sha256") if verify_pdf else None,
+         },
+         **SAFETY,
+     }
+@@ -1616,6 +1619,7 @@
+     batch_started_at = _iso(now())
+     batch_start_monotonic = time.monotonic()
+     outcomes: list[dict[str, Any]] = []
++    search_index_updates: list[dict[str, Any]] = []
+     try:
+         lock_budget_seconds = time_budget_seconds - (time.monotonic() - batch_start_monotonic)
+         if lock_budget_seconds <= 0:
+@@ -1840,10 +1844,44 @@
+                     "diagnostic_redaction_note": "One transient diagnostic output contained an unrelated group metadata URL; no API response, signed file URL, or credential field was persisted.",
+                     **SAFETY,
+                 }
++                batch_receipt["search_index_updates"] = list(search_index_updates)
+                 _write_json(store, f"{processing_root}/processing_receipt.json", batch_receipt)
+                 _graph_notify("ZSXQ_PDF", "zsxq_pdf", trade_date, "COMMITTED",
+                               run_id=processing_run_id + ":" + source["document_key"],
+                               source_path=store.root / f"{processing_root}/processing_receipt.json")
++                # Preserve the scheduler's original graph notification order;
++                # derived-index work happens after the committed notification.
++                if not search_index_updates:
++                    if outcome.get("status") != "READY":
++                        search_index_updates.append({"status": "PARTIAL", "reason": "OWNER_DOCUMENT_NOT_READY"})
++                    elif time_budget_seconds - (time.monotonic() - batch_start_monotonic) < 2:
++                        search_index_updates.append({"status": "PARTIAL", "reason": "SEARCH_UPDATE_BUDGET_EXHAUSTED"})
++                    else:
++                        try:
++                            from infrastructure.zsxq_pdf_search_index import _refresh_locked, INLINE_PDF_BYTES
++                            search_index_updates.append(_refresh_locked(store, index, trade_date,
++                                [source["document_key"]], max_pdf_bytes=INLINE_PDF_BYTES))
++                        except Exception as error:
++                            reason = getattr(error, "code", None)
++                            if not reason and re.fullmatch(r"[A-Z0-9_]{1,80}", str(error)):
++                                reason = str(error)
++                            search_index_updates.append({"status": "CANNOT_CONFIRM", "reason": reason or type(error).__name__})
++            if (not enqueue_only and not any(update.get("status") == "CANNOT_CONFIRM" for update in search_index_updates)
++                    and time_budget_seconds - (time.monotonic() - batch_start_monotonic) >= 2):
++                try:
++                    from infrastructure.zsxq_pdf_search_index import _next_pending_locked, _refresh_locked, INLINE_PDF_BYTES
++                    attempted_ids = {item.get("document_id") for update in search_index_updates
++                                     for item in update.get("results", []) if item.get("document_id")}
++                    pending_id = _next_pending_locked(store, index, trade_date,
++                                                       max_pdf_bytes=INLINE_PDF_BYTES, exclude=attempted_ids)
++                    if pending_id:
++                        search_index_updates.append(_refresh_locked(store, index, trade_date,
++                            [pending_id], max_pdf_bytes=INLINE_PDF_BYTES))
++                except Exception as error:
++                    reason = getattr(error, "code", None)
++                    if not reason and re.fullmatch(r"[A-Z0-9_]{1,80}", str(error)):
++                        reason = str(error)
++                    search_index_updates.append({"status": "CANNOT_CONFIRM", "reason": reason or type(error).__name__})
+             def queue_counts() -> tuple[int, int, int, int]:
+                 runs = [
+                     latest[1]
+@@ -1908,6 +1946,7 @@
+                     "diagnostic_redaction_note": "One transient diagnostic output contained an unrelated group metadata URL; no API response, signed file URL, or credential field was persisted.",
+                     **SAFETY,
+                 }
++                batch_receipt["search_index_updates"] = list(search_index_updates)
+                 _write_json(store, f"{processing_root}/processing_receipt.json", batch_receipt)
+             else:
+                 ready_count, partial_count, failed_count, pending_count = queue_counts()
+@@ -1924,6 +1963,7 @@
+                 batch_receipt["failed_total"] = failed_count
+                 batch_receipt["batch_completed_at"] = _iso(now())
+                 batch_receipt["batch_duration_seconds"] = round(time.monotonic() - batch_start_monotonic, 3)
++                batch_receipt["search_index_updates"] = list(search_index_updates)
+                 _write_json(store, f"{processing_root}/processing_receipt.json", batch_receipt)
+         return {
+             "status": result_status,
+@@ -1943,6 +1983,7 @@
+             "engine_identity": engine_identity,
+             "engine": engine_descriptor,
+             "receipt_path": f"{processing_root}/processing_receipt.json",
++            "search_index_updates": search_index_updates,
+             **SAFETY,
+         }
+     finally:
+@@ -2109,6 +2150,7 @@
+     if type(retry_backoff_seconds) is not int or not 1 <= retry_backoff_seconds <= 3600:
+         raise ZsxqPdfError("PDF_RETRY_BACKOFF_INVALID")
+ 
++    tick_started_monotonic = time.monotonic()
+     root = Path(data_root).expanduser()
+     if not root.is_dir() or root.is_symlink():
+         raise ZsxqPdfError("DATA_ROOT_INVALID")
+@@ -2118,7 +2160,7 @@
+         return _pdf_queue_deferred(admission)
+     tasks = pending_pdf_tasks(root)
+     if not tasks:
+-        return {
++        result = {
+             "schema_version": "v4.zsxq_pdf_queue_tick.v1",
+             "status": "NO_RETRYABLE_TASKS",
+             "processed_document_count": 0,
+@@ -2128,6 +2170,16 @@
+             "retry_backoff_seconds": retry_backoff_seconds,
+             **SAFETY,
+         }
++        # An idle queue tick can advance one disposable search entry. The
++        # indexer rechecks admission and idle state under this owner's lock.
++        # Its failure never alters PDF state, receipt, status, or graph.
++        try:
++            from infrastructure.zsxq_pdf_search_maintenance import run_idle_maintenance
++            result["search_index_maintenance"] = run_idle_maintenance(
++                root, deadline=tick_started_monotonic + time_budget_seconds, now=now)
++        except Exception as error:
++            result["search_index_maintenance"] = {"status": "CANNOT_CONFIRM", "reason": _error_code(error), **SAFETY}
++        return result
+ 
+     store = NativeDataStore(root)
+     index = _read_index(store)
+@@ -2221,6 +2273,7 @@
+         "partial_total": batch.get("partial_total"),
+         "failed_total": batch.get("failed_total"),
+         "pending_total": batch.get("pending_total"),
++        "search_index_updates": batch.get("search_index_updates", []),
+         "pending_task_count": len(pending_pdf_tasks(root)),
+         "retry_after_seconds": remaining,
+         "before_status": before.get("status"),
+@@ -2357,6 +2410,69 @@
+     if partial or failed or cannot:
+         return "PARTIAL" if any((done, partial)) else "FAILED" if failed else "CANNOT_CONFIRM"
+     return "READY" if done else "READY_EMPTY"
++
++
++def refresh_pdf_search_index(data_root: Path, **kwargs: Any) -> dict[str, Any]:
++    """Run a bounded derived-index update under this owner's existing lock."""
++    from infrastructure.zsxq_pdf_search_index import refresh
++    return refresh(data_root, **kwargs)
++
++
++def query_pdf_search_index(data_root: Path, terms: Mapping[str, list[str]]) -> dict[str, Any]:
++    """Read derived search candidates; callers must reverify each original."""
++    from infrastructure.zsxq_pdf_search_index import query
++    return query(data_root, terms)
++
++
++def read_pdf_index_scope(data_root: Path) -> dict[str, Any]:
++    """List candidate dates and recheck each indexed source enumeration.
++
++    This is only the ingestion index's scope; it is not a claim about all
++    historical research, all ZSXQ attachments, or any unindexed sources.
++    """
++    try:
++        root = Path(data_root).expanduser()
++        if not root.is_dir() or root.is_symlink():
++            raise ZsxqPdfError("DATA_ROOT_INVALID")
++        if not _safe_artifact_path(root, STATE_RELATIVE).is_file():
++            raise ZsxqPdfError("PDF_INGESTION_NOT_MATERIALIZED")
++        store = NativeDataStore(root)
++        index = _read_index(store)
++        dates: set[str] = set()
++        gaps: list[dict[str, str]] = []
++        bindings: dict[str, Any] = {}
++        def scope_day(value: Any) -> str:
++            text = str(value or "")
++            if not re.fullmatch(r"[0-9]{8}", text):
++                raise ZsxqPdfError("TRADE_DATE_INVALID")
++            return _date(text)
++        for source_run_id, source in index["sources"].items():
++            try:
++                if not isinstance(source, Mapping):
++                    raise ZsxqPdfError("PDF_SOURCE_ENUMERATION_MISSING")
++                day = scope_day(source.get("trade_date"))
++                dates.add(day)
++                _verified_source_enumeration(store, index, str(source_run_id), source)
++                bindings[str(source_run_id)] = {"status": "VERIFIED", "source_signature": source.get("source_signature"),
++                                                "input_sha256": source.get("input_sha256")}
++            except (ZsxqPdfError, OSError, ValueError, TypeError) as error:
++                reason = _error_code(error)
++                gaps.append({"source_run_id": str(source_run_id), "reason": reason})
++                bindings[str(source_run_id)] = {"status": "CANNOT_CONFIRM", "reason": reason}
++        for document_id, row in index["documents"].items():
++            try:
++                if not isinstance(row, Mapping) or not isinstance(row.get("source"), Mapping):
++                    raise ZsxqPdfError("DOCUMENT_SOURCE_INVALID")
++                source = row["source"]
++                day = scope_day(source.get("trade_date"))
++                dates.add(day)
++                if str(source.get("source_run_id") or "") not in index["sources"]:
++                    raise ZsxqPdfError("PDF_SOURCE_ENUMERATION_MISSING")
++            except (ZsxqPdfError, OSError, ValueError, TypeError) as error:
++                gaps.append({"document_id": str(document_id), "reason": _error_code(error)})
++        return {"dates": sorted(dates), "gaps": gaps, "source_bindings": bindings, "scope": "INGESTION_INDEX_ONLY"}
++    except (ZsxqPdfError, OSError, ValueError, TypeError) as error:
++        return {"dates": [], "gaps": [{"reason": _error_code(error)}], "source_bindings": {}, "scope": "INGESTION_INDEX_ONLY"}
+ 
+ 
+ def read_pdf_ingestion_projection(data_root: Path, research_date: str) -> dict[str, Any]:
+--- /dev/null
++++ b/infrastructure/zsxq_pdf_search_index.py
+@@ -0,0 +1,428 @@
++"""Disposable, date-sharded PDF search hints maintained by the existing owner.
++
++This module has no scheduler or acquisition path. A hit only chooses a document
++for the existing PDF/receipt/source verifier; the index is never authority.
++"""
++from __future__ import annotations
++
++import base64
++import binascii
++import hashlib
++import json
++import re
++from pathlib import Path
++from typing import Any, Mapping, Sequence
++
++from infrastructure.data_store import NativeDataStore
++
++INDEX_ROOT = 'external_sources/zsxq_hourly/pdf_search_derived_v1'
++SCHEMA = 'v4.zsxq_pdf_search_day.v1'
++BIT_COUNT = 16384
++BIT_BYTES = BIT_COUNT // 8
++MAX_DAY_BYTES = 16 * 1024 * 1024
++MAX_BATCH_DOCUMENTS = 10
++INLINE_PDF_BYTES = 4 * 1024 * 1024
++MAX_PDF_BYTES = 64 * 1024 * 1024
++SAFETY = {'research_only': True, 'production_allowed': False,
++          'buy_gate_updated': False, 'orders_sent': False}
++
++
++class SearchIndexError(ValueError):
++    pass
++
++
++def _owner():
++    from infrastructure import zsxq_pdf_ingestion
++    return zsxq_pdf_ingestion
++
++
++def _canonical(value: Any) -> bytes:
++    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
++
++
++def _sha(raw: bytes) -> str:
++    return hashlib.sha256(raw).hexdigest()
++
++
++def _path(day: str) -> str:
++    if not isinstance(day, str) or not re.fullmatch(r'[0-9]{8}', day):
++        raise SearchIndexError('SEARCH_DATE_INVALID')
++    try:
++        _owner()._date(day)
++    except ValueError as error:
++        raise SearchIndexError('SEARCH_DATE_INVALID') from error
++    return f'{INDEX_ROOT}/days/{day}.json'
++
++
++def _fingerprint(index: Mapping[str, Any], document_id: str) -> tuple[str, str, str]:
++    row = index['documents'].get(document_id)
++    if not isinstance(row, Mapping) or not isinstance(row.get('source'), Mapping):
++        return _sha(_canonical({'document_id': document_id, 'row': row})), '', 'INVALID'
++    source = row['source']
++    day = str(source.get('trade_date') or '')
++    run_id = str(source.get('source_run_id') or '')
++    latest = _owner()._latest_engine_run(row)
++    status = str(latest[1].get('status') or 'PENDING').upper() if latest else 'PENDING'
++    version = {'source': source, 'source_entry': index['sources'].get(run_id),
++               'latest_engine_id': latest[0] if latest else None,
++               'latest_engine': latest[1] if latest else None}
++    return _sha(_canonical(version)), day, status
++
++
++def _positions(gram: str) -> tuple[int, int, int]:
++    digest = hashlib.sha256(gram.encode('utf-8')).digest()
++    return tuple(int.from_bytes(digest[i:i+2], 'big') % BIT_COUNT for i in (0, 2, 4))
++
++
++def _text_bits(segments: Sequence[str]) -> bytes:
++    bits = bytearray(BIT_BYTES)
++    grams: set[str] = set()
++    for segment in segments:
++        text = segment.casefold()
++        grams.update(text[i:i+2] for i in range(len(text)-1))
++    for gram in grams:
++        for pos in _positions(gram):
++            bits[pos >> 3] |= 1 << (pos & 7)
++    return bytes(bits)
++
++
++def _term_positions(term: str) -> tuple[int, ...]:
++    text = term.casefold()
++    if len(text) < 2:
++        raise SearchIndexError('SEARCH_TERM_TOO_SHORT')
++    return tuple(sorted({pos for i in range(len(text)-1) for pos in _positions(text[i:i+2])}))
++
++
++def _maybe(bits: bytes, positions: Sequence[int]) -> bool:
++    return all(bits[p >> 3] & (1 << (p & 7)) for p in positions)
++
++
++def _read_day(store: NativeDataStore, day: str) -> tuple[dict[str, Any] | None, str | None]:
++    try:
++        raw = _owner()._store_io(store).read_bytes(_path(day), max_bytes=MAX_DAY_BYTES)
++    except FileNotFoundError:
++        return None, None
++    except (OSError, ValueError) as error:
++        raise SearchIndexError('SEARCH_INDEX_DAY_UNREADABLE') from error
++    try:
++        outer = json.loads(raw.decode('utf-8'))
++        body = outer['body']
++        if (not isinstance(body, dict) or body.get('schema_version') != SCHEMA
++                or body.get('research_date') != day or not isinstance(body.get('entries'), dict)
++                or outer.get('sha256') != _sha(_canonical(body))):
++            raise ValueError('invalid envelope')
++        for doc_id, record in body['entries'].items():
++            if (not isinstance(doc_id, str) or not re.fullmatch(r'[0-9a-f]{64}', doc_id)
++                    or not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{64}', str(record.get('fingerprint') or ''))):
++                raise ValueError('invalid entry')
++            bloom = record.get('bloom')
++            if bloom is not None:
++                if (len(base64.b64decode(bloom, validate=True)) != BIT_BYTES
++                        or not re.fullmatch(r'[0-9a-f]{64}', str(record.get('verified_pdf_sha256') or ''))
++                        or not re.fullmatch(r'[0-9a-f]{64}', str(record.get('receipt_sha256') or ''))
++                        or type(record.get('page_count')) is not int or record['page_count'] < 1
++                        or ('verified_pdf_size' in record and
++                            (type(record['verified_pdf_size']) is not int or not 1 <= record['verified_pdf_size'] <= MAX_PDF_BYTES))
++                        or ('verified_pages_size' in record and
++                            (type(record['verified_pages_size']) is not int or not 1 <= record['verified_pages_size'] <= 32 * 1024 * 1024))):
++                    raise ValueError('invalid bloom or provenance')
++    except (UnicodeError, ValueError, TypeError, KeyError, binascii.Error) as error:
++        raise SearchIndexError('SEARCH_INDEX_DAY_CORRUPT') from error
++    return body, _sha(raw)
++
++
++def _write_day(store: NativeDataStore, body: Mapping[str, Any]) -> str:
++    raw = _canonical({'body': body, 'sha256': _sha(_canonical(body))})
++    if len(raw) > MAX_DAY_BYTES:
++        raise SearchIndexError('SEARCH_INDEX_DAY_SIZE_LIMIT')
++    _owner()._store_io(store).write_bytes(_path(str(body['research_date'])), raw)
++    return _sha(raw)
++
++
++def _next_pending_locked(store: NativeDataStore, index: Mapping[str, Any], day: str, *,
++                         max_pdf_bytes: int, exclude: set[str]) -> str | None:
++    """Choose one bounded, previously unindexed READY doc without retry loops."""
++    body, _ = _read_day(store, day)
++    entries = (body or {}).get('entries', {})
++    for doc_id, row in sorted(index['documents'].items()):
++        if (doc_id in exclude or not isinstance(row, Mapping) or not isinstance(row.get('source'), Mapping)
++                or row['source'].get('trade_date') != day):
++            continue
++        fingerprint, _day, status = _fingerprint(index, doc_id)
++        previous = entries.get(doc_id) or {}
++        if status != 'READY' or (previous.get('fingerprint') == fingerprint and previous.get('verification_error')):
++            continue
++        if previous.get('fingerprint') == fingerprint and previous.get('bloom') and previous.get('verified_pdf_size') and previous.get('verified_pages_size'):
++            continue
++        latest = _owner()._latest_engine_run(row)
++        if latest and int(latest[1].get('pdf_size') or 0) <= max_pdf_bytes:
++            return doc_id
++    return None
++
++
++def _refresh_locked(store: NativeDataStore, index: Mapping[str, Any], day: str, ids: Sequence[str], *,
++                    max_pdf_bytes: int, reset_corrupt: bool = False, force_verify: bool = False) -> dict[str, Any]:
++    """Update one date under the PDF owner's existing kernel lock."""
++    _path(day)
++    if (not 1 <= max_pdf_bytes <= MAX_PDF_BYTES or len(ids) > MAX_BATCH_DOCUMENTS
++            or any(not isinstance(x, str) or not re.fullmatch(r'[0-9a-f]{64}', x) for x in ids)):
++        raise SearchIndexError('SEARCH_UPDATE_ARGUMENT_INVALID')
++    reset_or_missing = False
++    try:
++        body, _ = _read_day(store, day)
++    except SearchIndexError as error:
++        if str(error) != 'SEARCH_INDEX_DAY_CORRUPT' or not reset_corrupt:
++            raise
++        raw = _owner()._store_io(store).read_bytes(_path(day), max_bytes=MAX_DAY_BYTES)
++        quarantine = f'{INDEX_ROOT}/quarantine/{day}-{_sha(raw)}.json'
++        try:
++            _owner()._store_io(store).write_bytes(quarantine, raw, require_absent=True)
++        except FileExistsError:
++            if _owner()._store_io(store).read_bytes(quarantine, max_bytes=MAX_DAY_BYTES) != raw:
++                raise SearchIndexError('SEARCH_QUARANTINE_CONFLICT')
++        body = None
++        reset_or_missing = True
++    if body is None:
++        reset_or_missing = True
++    body = body or {'schema_version': SCHEMA, 'research_date': day, 'entries': {}}
++    entries = body['entries']
++    results = []
++    changed = False
++    for doc_id in dict.fromkeys(ids):
++        if doc_id not in index['documents']:
++            results.append({'document_id': doc_id, 'status': 'OWNER_DOCUMENT_REMOVED'})
++            continue  # preserve the old derived record; query excludes it.
++        fingerprint, observed_day, status = _fingerprint(index, doc_id)
++        if observed_day != day:
++            results.append({'document_id': doc_id, 'status': 'SEARCH_DATE_MISMATCH'})
++            continue
++        prior = entries.get(doc_id)
++        if status != 'READY':
++            if prior:
++                updated = dict(prior, verification_error='OWNER_DOCUMENT_NOT_READY')
++                entries[doc_id] = updated
++                changed = changed or updated != prior
++            results.append({'document_id': doc_id, 'status': 'OWNER_DOCUMENT_NOT_READY'})
++            continue
++        row = index['documents'][doc_id]
++        latest = _owner()._latest_engine_run(row)
++        if prior and prior.get('fingerprint') == fingerprint and prior.get('verified_pdf_size') and prior.get('verified_pages_size') and not prior.get('verification_error') and not force_verify:
++            results.append({'document_id': doc_id, 'status': 'ALREADY_INDEXED'})
++            continue
++        if int(latest[1].get('pdf_size') or 0) > max_pdf_bytes:
++            results.append({'document_id': doc_id, 'status': 'SEARCH_UPDATE_PDF_SIZE_LIMIT'})
++            continue
++        try:
++            detail = _owner()._verified_document_detail(store, index, doc_id, verify_pdf=True)
++            receipt = detail['receipt']
++            pdf_sha = receipt.get('verified_pdf_sha256')
++            pdf_size = detail.get('processing', {}).get('verified_pdf_size')
++            pages_size = detail.get('processing', {}).get('verified_pages_size')
++            if (detail.get('status') != 'READY' or receipt.get('integrity') != 'SOURCE_PDF_AND_PAGE_HASHES_VERIFIED'
++                    or not isinstance(pdf_sha, str) or not re.fullmatch(r'[0-9a-f]{64}', pdf_sha)
++                    or type(pdf_size) is not int or not 1 <= pdf_size <= MAX_PDF_BYTES
++                    or type(pages_size) is not int or not 1 <= pages_size <= 32 * 1024 * 1024):
++                raise SearchIndexError('SEARCH_OWNER_DETAIL_INVALID')
++            source = detail['source']
++            pages = detail['pages']
++            segments = [str(source.get('topic_title') or ''), str(source.get('original_filename') or '')]
++            segments.extend(str(page.get('text') or '') for page in pages)
++            entries[doc_id] = {'fingerprint': fingerprint, 'verified_pdf_sha256': pdf_sha,
++                               'verified_pdf_size': pdf_size,
++                               'verified_pages_size': pages_size,
++                               'receipt_sha256': receipt.get('sha256'), 'source_run_id': source.get('source_run_id'),
++                               'page_count': len(pages), 'bloom': base64.b64encode(_text_bits(segments)).decode('ascii'),
++                               'verification_error': None}
++            changed = True
++            results.append({'document_id': doc_id, 'status': 'INDEXED', 'page_count': len(pages)})
++        except (ValueError, OSError, KeyError, TypeError) as error:
++            reason = getattr(error, 'code', None) or (str(error) if isinstance(error, SearchIndexError) else type(error).__name__)
++            if prior:
++                updated = dict(prior, verification_error=reason)
++            else:
++                updated = {'fingerprint': fingerprint, 'verification_error': reason, 'bloom': None}
++            entries[doc_id] = updated
++            changed = changed or updated != prior
++            results.append({'document_id': doc_id, 'status': 'CANNOT_CONFIRM', 'reason': reason})
++    result_status = 'PARTIAL' if any(r['status'] not in {'INDEXED', 'ALREADY_INDEXED'} for r in results) else 'READY'
++    if results and (changed or reset_or_missing or any(r['status'] != 'ALREADY_INDEXED' for r in results)):
++        body['last_attempt_at'] = _owner()._iso()
++        body['last_update_status'] = result_status
++        if any(r['status'] == 'INDEXED' for r in results):
++            body['last_success_at'] = _owner()._iso()
++        changed = True
++    # One atomic publish for one day; failure leaves the previous committed bytes.
++    if changed or reset_or_missing:
++        checkpoint = _write_day(store, body)
++    else:
++        _, checkpoint = _read_day(store, day)
++    return {'status': result_status, 'research_date': day, 'results': results, 'checkpoint_sha256': checkpoint,
++            'last_success_at': body.get('last_success_at'), 'last_attempt_at': body.get('last_attempt_at'), **SAFETY}
++
++
++def refresh(data_root: Path | str, *, research_date: str, document_ids: Sequence[str] | None = None,
++            max_documents: int = 5, max_pdf_bytes: int = MAX_PDF_BYTES,
++            reset_corrupt: bool = False, retry_failed: bool = False) -> dict[str, Any]:
++    """Explicit bounded repair/backfill by the existing owner; never schedules work."""
++    if type(max_documents) is not int or not 1 <= max_documents <= MAX_BATCH_DOCUMENTS:
++        raise SearchIndexError('SEARCH_UPDATE_LIMIT_INVALID')
++    root = Path(data_root).expanduser()
++    if not root.is_dir() or root.is_symlink():
++        raise SearchIndexError('DATA_ROOT_INVALID')
++    _path(research_date)
++    store = NativeDataStore(root)
++    owner = _owner()
++    with owner._store_io(store).kernel_lock(owner.LOCK_RELATIVE, timeout=10):
++        index = owner._read_index(store)
++        if document_ids is None:
++            try:
++                body, _ = _read_day(store, research_date)
++            except SearchIndexError:
++                if not reset_corrupt:
++                    raise
++                body = None
++            entries = (body or {}).get('entries', {})
++            pending = []
++            deferred_failures = 0
++            for doc_id in sorted(index['documents']):
++                fp, day, status = _fingerprint(index, doc_id)
++                prior = entries.get(doc_id) or {}
++                if day != research_date or status != 'READY':
++                    continue
++                same_failed = prior.get('fingerprint') == fp and prior.get('verification_error')
++                if same_failed and not retry_failed:
++                    deferred_failures += 1
++                elif prior.get('fingerprint') != fp or same_failed or not prior.get('bloom') or not prior.get('verified_pdf_size') or not prior.get('verified_pages_size'):
++                    pending.append(doc_id)
++            ids = pending[:max_documents]
++        else:
++            if len(document_ids) > max_documents:
++                raise SearchIndexError('SEARCH_UPDATE_LIMIT_INVALID')
++            ids = list(document_ids)
++            pending = []
++            deferred_failures = 0
++        result = _refresh_locked(store, index, research_date, ids, max_pdf_bytes=max_pdf_bytes,
++                                 reset_corrupt=reset_corrupt, force_verify=document_ids is not None)
++        result['remaining_ready_candidates'] = max(0, len(pending) - len(ids)) if document_ids is None else None
++        result['ready_failed_deferred'] = deferred_failures if document_ids is None else None
++        return result
++
++
++def query(data_root: Path | str, terms: Mapping[str, Sequence[str]]) -> dict[str, Any]:
++    """Search every indexed day using a no-false-negative bigram Bloom prefilter."""
++    root = Path(data_root).expanduser()
++    if not root.is_dir() or root.is_symlink():
++        raise SearchIndexError('DATA_ROOT_INVALID')
++    store = NativeDataStore(root)
++    owner = _owner()
++    index = owner._read_index(store)
++    inventory: dict[str, tuple[str, str, str]] = {}
++    malformed = 0
++    for doc_id in index['documents']:
++        try:
++            if not re.fullmatch(r'[0-9a-f]{64}', doc_id):
++                raise ValueError('document id')
++            fp, day, status = _fingerprint(index, doc_id)
++            _path(day)
++            inventory[doc_id] = (fp, day, status)
++        except (ValueError, TypeError, KeyError):
++            malformed += 1
++    inventory_days = {value[1] for value in inventory.values()}
++    cache_days: set[str] = set()
++    discovery_gaps: list[dict[str, Any]] = []
++    try:
++        for filename in owner._store_io(store).files(f'{INDEX_ROOT}/days', suffix='.json'):
++            candidate_day = filename[:-5]
++            try:
++                _path(candidate_day)
++                cache_days.add(candidate_day)
++            except SearchIndexError:
++                discovery_gaps.append({'reason': 'SEARCH_INDEX_DAY_NAME_INVALID'})
++    except (OSError, ValueError):
++        discovery_gaps.append({'reason': 'SEARCH_INDEX_DIRECTORY_UNREADABLE'})
++    days = sorted(inventory_days | cache_days)
++    masks = {symbol: [_term_positions(term) for term in values] for symbol, values in terms.items()}
++    ledgers: dict[str, dict[str, Any]] = {}
++    hashes: dict[str, str] = {}
++    updates: dict[str, dict[str, Any]] = {}
++    gaps: list[dict[str, Any]] = discovery_gaps
++    for day in days:
++        try:
++            body, digest = _read_day(store, day)
++            if body is None:
++                gaps.append({'research_date': day, 'reason': 'SEARCH_INDEX_DATE_MISSING'})
++            else:
++                ledgers[day] = body['entries']
++                hashes[day] = str(digest)
++                updates[day] = {'last_success_at': body.get('last_success_at'),
++                                'last_attempt_at': body.get('last_attempt_at'),
++                                'last_update_status': body.get('last_update_status')}
++                if body.get('last_update_status') not in (None, 'READY'):
++                    gaps.append({'research_date': day, 'reason': 'SEARCH_LAST_UPDATE_PARTIAL',
++                                 'last_success_at': body.get('last_success_at')})
++        except SearchIndexError as error:
++            gaps.append({'research_date': day, 'reason': str(error)})
++    if not ledgers:
++        gaps.append({'reason': 'SEARCH_INDEX_NOT_MATERIALIZED'})
++    candidates = []
++    counts = {'owner_documents': len(inventory), 'indexed_documents': 0, 'unindexed_ready': 0, 'size_unknown_documents': 0,
++              'stale_documents': 0, 'unavailable_documents': 0, 'removed_documents': 0,
++              'large_ready_pending': 0, 'large_verification_error': 0,
++              'malformed_documents': malformed}
++    for doc_id, (fingerprint, day, status) in inventory.items():
++        record = ledgers.get(day, {}).get(doc_id)
++        if status != 'READY':
++            counts['unavailable_documents'] += 1
++            continue
++        latest = owner._latest_engine_run(index['documents'][doc_id])
++        size = latest[1].get('pdf_size') if latest else None
++        if (type(size) is int and INLINE_PDF_BYTES < size <= owner.MAX_PDF_BYTES
++                and (not record or record.get('fingerprint') != fingerprint or record.get('verification_error')
++                     or not record.get('bloom') or not record.get('verified_pdf_size') or not record.get('verified_pages_size'))):
++            counts['large_ready_pending'] += 1
++            if record and record.get('fingerprint') == fingerprint and record.get('verification_error'):
++                counts['large_verification_error'] += 1
++        if not record:
++            counts['unindexed_ready'] += 1
++            continue
++        if record.get('fingerprint') != fingerprint:
++            counts['stale_documents'] += 1
++            continue
++        if record.get('verification_error') or not record.get('bloom'):
++            counts['unavailable_documents'] += 1
++            continue
++        if not record.get('verified_pdf_size') or not record.get('verified_pages_size'):
++            counts['size_unknown_documents'] += 1
++            continue
++        counts['indexed_documents'] += 1
++        bits = base64.b64decode(record['bloom'], validate=True)
++        if any(_maybe(bits, positions) for symbol_masks in masks.values() for positions in symbol_masks):
++            candidates.append({'document_id': doc_id, 'research_date': day,
++                               'verified_pdf_sha256': record.get('verified_pdf_sha256'),
++                               'verified_pdf_size': record.get('verified_pdf_size'),
++                               'verified_pages_size': record.get('verified_pages_size')})
++    for day, entries in ledgers.items():
++        counts['removed_documents'] += sum(1 for doc_id in entries if doc_id not in inventory or inventory[doc_id][1] != day)
++    if counts['large_ready_pending']:
++        gaps.append({'reason': 'SEARCH_INDEX_LARGE_PENDING', 'count': counts['large_ready_pending'],
++                     'verification_errors': counts['large_verification_error']})
++    if malformed:
++        gaps.append({'reason': 'OWNER_INDEX_MALFORMED_DOCUMENTS', 'count': malformed})
++    for key, reason in [('unindexed_ready', 'SEARCH_INDEX_LAG'), ('size_unknown_documents', 'SEARCH_INDEX_SIZE_UNKNOWN'), ('stale_documents', 'SEARCH_INDEX_STALE'),
++                        ('unavailable_documents', 'OWNER_DOCUMENT_UNAVAILABLE'), ('removed_documents', 'SEARCH_INDEX_OWNER_DOCUMENT_REMOVED')]:
++        if counts[key]: gaps.append({'reason': reason, 'count': counts[key]})
++    scope = owner.read_pdf_index_scope(root)
++    gaps.extend(scope.get('gaps') or [])
++    inventory_digest = _sha(_canonical(sorted((doc_id, *value) for doc_id, value in inventory.items())))
++    binding_digest = _sha(_canonical(scope.get('source_bindings') or {}))
++    snapshot = _sha(_canonical({'ledgers': hashes, 'inventory': inventory_digest, 'source_bindings': binding_digest}))
++    candidates.sort(key=lambda row: (row['research_date'], row['document_id']), reverse=True)
++    return {'status': 'NOT_MATERIALIZED' if not ledgers else 'PARTIAL' if gaps else 'READY', 'candidates': candidates,
++            'checkpoint_sha256': snapshot, 'day_sha256': hashes, 'inventory_sha256': inventory_digest,
++            'source_bindings_sha256': binding_digest,
++            'coverage': {'scope': 'INGESTION_INDEX_ONLY', 'indexed_dates_seen': len(inventory_days),
++                         'cache_dates_seen': len(cache_days), 'dates_considered': days,
++                         'dates_scanned': sorted(ledgers), **counts, 'gaps': gaps,
++                         'index_updates': updates,
++                         'search_method': 'ALL_INDEXED_PAGE_BIGRAM_BLOOM_CANDIDATES_REVERIFY_PDF',
++                         'historical_sources_complete': False}, **SAFETY}
+--- /dev/null
++++ b/infrastructure/zsxq_pdf_search_maintenance.py
+@@ -0,0 +1,329 @@
++"""Bounded idle maintenance for the existing PDF owner; no scheduler here."""
++from __future__ import annotations
++
++import base64
++import binascii
++import hashlib
++import json
++import os
++import re
++import subprocess
++import sys
++import time
++from datetime import datetime, timedelta
++from pathlib import Path
++from typing import Any, Callable, Mapping
++
++from infrastructure import zsxq_pdf_ingestion as owner
++from infrastructure import zsxq_pdf_search_index as search
++
++STATE_PATH = f'{search.INDEX_ROOT}/idle_maintenance.json'
++STATE_SCHEMA = 'v4.zsxq_pdf_idle_maintenance.v1'
++MAX_OWNER_INDEX_BYTES = 32 * 1024 * 1024
++MAX_SCAN_DATES = 2
++MAX_INVENTORY_DAYS = 3660
++WORKER_ALARM_SECONDS = 8
++WORKER_WAIT_SECONDS = 9
++SOURCE_ALARM_SECONDS = 3
++SOURCE_WAIT_SECONDS = 4
++MIN_START_BUDGET_SECONDS = 17
++# Reserve the existing daemon 150s hard limit + its termination/reap margin.
++MIN_NIGHT_REMAINING_SECONDS = 160
++FAILURE_BACKOFF_SECONDS = 1800
++MAX_WORKER_OUTPUT_BYTES = 16384
++SANDBOX_EXEC = Path('/usr/bin/sandbox-exec')
++SANDBOX_PROFILE = '(version 1)(allow default)(deny network*)(deny file-write*)'
++WORKER_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'PYTHONNOUSERSITE': '1'}
++
++
++def _read_state(store: Any) -> dict[str, Any]:
++    try:
++        raw = owner._store_io(store).read_bytes(STATE_PATH, max_bytes=4096)
++    except FileNotFoundError:
++        return {'schema_version': STATE_SCHEMA, 'phase': 'SMALL', 'cursor_day': ''}
++    try:
++        value = json.loads(raw.decode('utf-8'))
++        if (not isinstance(value, dict) or value.get('schema_version') != STATE_SCHEMA
++                or value.get('phase') not in {'SMALL', 'LARGE'}
++                or not re.fullmatch(r'(?:[0-9]{8})?', str(value.get('cursor_day') or ''))
++                or not re.fullmatch(r'(?:[0-9]{8})?', str(value.get('last_large_day') or ''))):
++            raise ValueError('state')
++    except (ValueError, TypeError, UnicodeError) as error:
++        raise ValueError('SEARCH_MAINTENANCE_STATE_INVALID') from error
++    return value
++
++
++def _write_state(store: Any, state: Mapping[str, Any]) -> None:
++    raw = search._canonical(state)
++    if len(raw) > 4096:
++        raise ValueError('SEARCH_MAINTENANCE_STATE_TOO_LARGE')
++    owner._store_io(store).write_bytes(STATE_PATH, raw)
++
++
++def _read_bounded_index(store: Any) -> tuple[dict[str, Any], str]:
++    try:
++        raw = owner._store_io(store).read_bytes(owner.STATE_RELATIVE, max_bytes=MAX_OWNER_INDEX_BYTES)
++    except FileNotFoundError:
++        index = {'schema_version': 'v4.zsxq_pdf_ingestion_index.v1', 'sources': {}, 'documents': {}, 'ocr_cache': {}}
++        return index, hashlib.sha256(search._canonical(index)).hexdigest()
++    index = json.loads(raw.decode('utf-8'))
++    if (not isinstance(index, dict) or index.get('schema_version') != 'v4.zsxq_pdf_ingestion_index.v1'
++            or any(not isinstance(index.get(k), dict) for k in ('sources', 'documents', 'ocr_cache'))):
++        raise ValueError('PROCESSING_INDEX_INVALID')
++    return index, hashlib.sha256(raw).hexdigest()
++
++
++def _remaining_night_seconds(moment: datetime) -> float:
++    admission = owner.pdf_queue_night_admission(moment)
++    if not admission.get('allowed'):
++        return 0.0
++    local = moment.astimezone(owner.SHANGHAI)
++    closes = local.replace(hour=8, minute=30, second=0, microsecond=0)
++    return max(0.0, (closes - local).total_seconds())
++
++
++def _eligible(record: Mapping[str, Any] | None, fingerprint: str, now: datetime) -> bool:
++    if not record or record.get('fingerprint') != fingerprint:
++        return True
++    if (record.get('bloom') and record.get('verified_pdf_size') and record.get('verified_pages_size')
++            and not record.get('verification_error')):
++        return False
++    due = record.get('auto_next_retry_at')
++    if not due:
++        return True  # Pre-v5 error entries get one bounded, backoff-controlled try.
++    try:
++        parsed = datetime.fromisoformat(str(due))
++        if parsed.tzinfo is None or parsed.utcoffset() is None:
++            return False
++        return now >= parsed
++    except (ValueError, TypeError):
++        return False
++
++
++def _pick_day(index: Mapping[str, Any], day: str, entries: Mapping[str, Any], body: Mapping[str, Any],
++              phase: str, now: datetime) -> tuple[str, str, str] | None:
++    docs: dict[str, tuple[str, int]] = {}
++    for doc_id, row in index['documents'].items():
++        if (not isinstance(doc_id, str) or not re.fullmatch(r'[0-9a-f]{64}', doc_id)
++                or not isinstance(row, Mapping) or not isinstance(row.get('source'), Mapping)
++                or row['source'].get('trade_date') != day):
++            continue
++        fingerprint, _, status = search._fingerprint(index, doc_id)
++        latest = owner._latest_engine_run(row)
++        size = latest[1].get('pdf_size') if latest else None
++        if status != 'READY' or type(size) is not int or not 1 <= size <= owner.MAX_PDF_BYTES:
++            continue
++        record = entries.get(doc_id)
++        if record is not None and not isinstance(record, Mapping):
++            continue
++        if _eligible(record, fingerprint, now):
++            docs[doc_id] = (fingerprint, size)
++    # Small documents have priority even if they arrived during the large scan.
++    categories = ('SMALL',) if phase == 'SMALL' else ('SMALL', 'LARGE')
++    for category in categories:
++        ids = sorted(doc_id for doc_id, (_, size) in docs.items()
++                     if (size <= search.INLINE_PDF_BYTES) == (category == 'SMALL'))
++        previous = str(body.get('idle_cursor_' + category.lower()) or '')
++        ids = [x for x in ids if x > previous] + [x for x in ids if x <= previous]
++        if ids:
++            doc_id = ids[0]
++            return doc_id, docs[doc_id][0], category
++    return None
++
++
++def _worker(root: Path, document_id: str, fingerprint: str, mode: str = 'FULL') -> tuple[dict[str, Any] | None, str | None]:
++    worker_path = Path(__file__).resolve().with_name('zsxq_pdf_search_worker.py')
++    owner_path, index_path = Path(owner.__file__).resolve(), Path(search.__file__).resolve()
++    sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
++    # Enforce isolation at the OS boundary. Never fall back to an unsandboxed
++    # worker when the fixed platform facility is missing or non-executable.
++    if sys.platform != 'darwin' or not SANDBOX_EXEC.is_file() or SANDBOX_EXEC.is_symlink() or not os.access(SANDBOX_EXEC, os.X_OK):
++        return None, 'SEARCH_WORKER_SANDBOX_UNAVAILABLE'
++    command = [str(SANDBOX_EXEC), '-p', SANDBOX_PROFILE, sys.executable, '-I', '-B', str(worker_path),
++               '--data-root', str(root.resolve()), '--document-id', document_id, '--fingerprint', fingerprint,
++               '--owner-sha256', sha(owner_path), '--index-sha256', sha(index_path),
++               '--alarm-seconds', str(WORKER_ALARM_SECONDS if mode == 'FULL' else SOURCE_ALARM_SECONDS),
++               '--mode', mode]
++    # No production environment is inherited, including graph paths or
++    # credentials; the OS may add its own __CF_USER_TEXT_ENCODING on macOS.
++    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
++                               stderr=subprocess.DEVNULL, env=dict(WORKER_ENV), close_fds=True)
++    try:
++        output, _ = process.communicate(timeout=WORKER_WAIT_SECONDS if mode == 'FULL' else SOURCE_WAIT_SECONDS)
++    except BaseException:
++        try:
++            process.kill()
++        except ProcessLookupError:
++            pass
++        try:
++            process.wait(timeout=1)
++        except subprocess.TimeoutExpired:
++            pass
++        raise
++    if len(output) > MAX_WORKER_OUTPUT_BYTES:
++        return None, 'SEARCH_WORKER_OUTPUT_TOO_LARGE'
++    try:
++        payload = json.loads(output.decode('ascii'))
++    except (ValueError, UnicodeError):
++        return None, 'SEARCH_WORKER_TIMEOUT_OR_OUTPUT_INVALID' if process.returncode else 'SEARCH_WORKER_OUTPUT_INVALID'
++    if process.returncode != 0 or not isinstance(payload, dict) or payload.get('ok') is not True:
++        reason = str(payload.get('reason') or 'SEARCH_WORKER_FAILED') if isinstance(payload, dict) else 'SEARCH_WORKER_FAILED'
++        return None, reason if re.fullmatch(r'[A-Z0-9_]{1,80}', reason) else 'SEARCH_WORKER_FAILED'
++    return payload, None
++
++
++def _checked_entry(payload: Mapping[str, Any], index: Mapping[str, Any], doc_id: str, day: str, fingerprint: str) -> dict[str, Any]:
++    try:
++        bloom = base64.b64decode(payload.get('bloom'), validate=True)
++    except (ValueError, TypeError, binascii.Error) as error:
++        raise ValueError('SEARCH_WORKER_OUTPUT_INVALID') from error
++    row = index['documents'][doc_id]
++    source = row['source']
++    latest = owner._latest_engine_run(row)
++    if (payload.get('document_id') != doc_id or payload.get('research_date') != day
++            or payload.get('fingerprint') != fingerprint or payload.get('source_run_id') != source.get('source_run_id')
++            or latest is None or payload.get('verified_pdf_sha256') != latest[1].get('pdf_sha256')
++            or payload.get('verified_pdf_size') != latest[1].get('pdf_size')
++            or type(payload.get('verified_pdf_size')) is not int or not 1 <= payload['verified_pdf_size'] <= owner.MAX_PDF_BYTES
++            or type(payload.get('verified_pages_size')) is not int or not 1 <= payload['verified_pages_size'] <= 32*1024*1024
++            or type(payload.get('page_count')) is not int or payload['page_count'] != latest[1].get('page_count')
++            or not re.fullmatch(r'[0-9a-f]{64}', str(payload.get('receipt_sha256') or ''))
++            or len(bloom) != search.BIT_BYTES):
++        raise ValueError('SEARCH_WORKER_OUTPUT_INVALID')
++    return {key: payload[key] for key in ('fingerprint', 'source_run_id', 'verified_pdf_sha256', 'verified_pdf_size',
++            'verified_pages_size', 'receipt_sha256', 'page_count', 'bloom')} | {'verification_error': None}
++
++
++def run_idle_maintenance(data_root: Path, *, deadline: float, now: Callable[[], datetime]) -> dict[str, Any]:
++    """At most one verified document; caller remains the sole durable owner."""
++    root = Path(data_root)
++    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
++        raise ValueError('DATA_ROOT_INVALID')
++    moment = now()
++    if _remaining_night_seconds(moment) < MIN_NIGHT_REMAINING_SECONDS or deadline-time.monotonic() < MIN_START_BUDGET_SECONDS:
++        return {'status': 'DEFERRED', 'reason': 'SEARCH_IDLE_TIME_OR_NIGHT_BUDGET', **owner.SAFETY}
++    store = owner.NativeDataStore(root)
++    try:
++        with owner._store_io(store).kernel_lock(owner.LOCK_RELATIVE, timeout=0.2):
++            if _remaining_night_seconds(now()) < MIN_NIGHT_REMAINING_SECONDS or deadline-time.monotonic() < MIN_START_BUDGET_SECONDS:
++                return {'status': 'DEFERRED', 'reason': 'SEARCH_IDLE_TIME_OR_NIGHT_BUDGET', **owner.SAFETY}
++            index, owner_digest = _read_bounded_index(store)
++            for row in index['documents'].values():
++                if not isinstance(row, Mapping):
++                    return {'status': 'DEFERRED', 'reason': 'SEARCH_OWNER_QUEUE_NOT_CONFIRMED_IDLE', **owner.SAFETY}
++                latest = owner._latest_engine_run(row)
++                if latest is None or owner._engine_run_is_retryable(latest[1]):
++                    return {'status': 'DEFERRED', 'reason': 'SEARCH_OWNER_QUEUE_NOT_IDLE', **owner.SAFETY}
++            days = set()
++            for row in index['documents'].values():
++                source = row.get('source') if isinstance(row, Mapping) else None
++                latest = owner._latest_engine_run(row) if isinstance(row, Mapping) else None
++                if isinstance(source, Mapping) and latest and str(latest[1].get('status')).upper() == 'READY':
++                    try:
++                        days.add(owner._date(str(source.get('trade_date') or '')))
++                    except ValueError:
++                        continue
++            days = sorted(days)
++            if not days:
++                return {'status': 'NO_READY_DOCUMENTS', **owner.SAFETY}
++            if len(days) > MAX_INVENTORY_DAYS:
++                return {'status': 'DEFERRED', 'reason': 'SEARCH_IDLE_DAY_LIMIT', **owner.SAFETY}
++            state = _read_state(store)
++            if state.get('owner_index_sha256') != owner_digest:
++                state.update(phase='SMALL', cursor_day='', owner_index_sha256=owner_digest)
++            phase, cursor = state['phase'], state['cursor_day']
++            # After each large attempt resume at the following date; a busy or
++            # repeatedly failing date cannot monopolize all cross-date turns.
++            last_large = state.get('last_large_day') or ''
++            ordered = ([day for day in days if day > last_large] + [day for day in days if day <= last_large]
++                       if phase == 'LARGE' and last_large in days else days)
++            remaining = ordered[ordered.index(cursor)+1:] if cursor in ordered else ordered
++            if not remaining:
++                state.update(phase='LARGE' if phase == 'SMALL' else 'SMALL', cursor_day='', last_status='SCAN_CYCLE_END')
++                _write_state(store, state)
++                return {'status': 'SCAN_CONTINUES', 'phase': state['phase'], **owner.SAFETY}
++            scanned = []
++            scan_error = False
++            for day in remaining[:MAX_SCAN_DATES]:
++                if _remaining_night_seconds(now()) < MIN_NIGHT_REMAINING_SECONDS or deadline-time.monotonic() < MIN_START_BUDGET_SECONDS:
++                    break
++                scanned.append(day)
++                state['cursor_day'] = day
++                try:
++                    body, _ = search._read_day(store, day)
++                except search.SearchIndexError:
++                    scan_error = True
++                    continue
++                body = body or {'schema_version': search.SCHEMA, 'research_date': day, 'entries': {}}
++                choice = _pick_day(index, day, body['entries'], body, phase, now())
++                if not choice:
++                    continue
++                doc_id, fingerprint, category = choice
++                stamp = now()
++                retry_at = stamp + timedelta(seconds=FAILURE_BACKOFF_SECONDS)
++                body['entries'][doc_id] = {'fingerprint': fingerprint, 'bloom': None,
++                    'verification_error': 'SEARCH_AUTO_ATTEMPT_INTERRUPTED', 'auto_attempt_at': owner._iso(stamp),
++                    'auto_next_retry_at': owner._iso(retry_at)}
++                body['idle_cursor_' + category.lower()] = doc_id
++                body['last_attempt_at'] = owner._iso(stamp)
++                body['last_update_status'] = 'PARTIAL'
++                search._write_day(store, body)  # durable before launching the reader
++                state.update(phase='SMALL', cursor_day='', last_status='ATTEMPT_STARTED', last_day=day, last_document_id=doc_id)
++                if category == 'LARGE':
++                    state['last_large_day'] = day
++                _write_state(store, state)
++                if _remaining_night_seconds(now()) < MIN_NIGHT_REMAINING_SECONDS or deadline-time.monotonic() < MIN_START_BUDGET_SECONDS:
++                    reason, payload = 'SEARCH_IDLE_TIME_OR_NIGHT_BUDGET', None
++                else:
++                    try:
++                        payload, reason = _worker(root, doc_id, fingerprint)
++                    except subprocess.TimeoutExpired:
++                        payload, reason = None, 'SEARCH_WORKER_TIMEOUT'
++                    except Exception as error:
++                        payload, reason = None, type(error).__name__.upper()
++                if payload is not None:
++                    try:
++                        current, _ = _read_bounded_index(store)
++                        current_fp, current_day, current_status = search._fingerprint(current, doc_id)
++                        if (current_fp, current_day, current_status) != (fingerprint, day, 'READY'):
++                            raise ValueError('SEARCH_WORKER_STALE')
++                        if (_remaining_night_seconds(now()) < MIN_NIGHT_REMAINING_SECONDS
++                                or deadline-time.monotonic() < SOURCE_WAIT_SECONDS + 2):
++                            raise ValueError('SEARCH_IDLE_TIME_OR_NIGHT_BUDGET')
++                        try:
++                            source_proof, source_reason = _worker(root, doc_id, fingerprint, 'SOURCE')
++                        except subprocess.TimeoutExpired:
++                            source_proof, source_reason = None, 'SEARCH_SOURCE_RECHECK_TIMEOUT'
++                        if source_proof is None:
++                            raise ValueError(source_reason or 'SEARCH_SOURCE_RECHECK_FAILED')
++                        if (source_proof.get('document_id') != doc_id or source_proof.get('research_date') != day
++                                or source_proof.get('fingerprint') != fingerprint
++                                or source_proof.get('source_run_id') != payload.get('source_run_id')):
++                            raise ValueError('SEARCH_SOURCE_RECHECK_INVALID')
++                        body['entries'][doc_id] = _checked_entry(payload, current, doc_id, day, fingerprint)
++                        body['last_success_at'] = owner._iso(now())
++                        body['last_update_status'] = 'READY'
++                        reason = None
++                    except (ValueError, OSError, KeyError, TypeError) as error:
++                        payload, reason = None, getattr(error, 'code', None) or str(error)
++                if reason:
++                    if not re.fullmatch(r'[A-Z0-9_]{1,80}', str(reason)):
++                        reason = 'SEARCH_IDLE_VERIFY_FAILED'
++                    body['entries'][doc_id]['verification_error'] = reason
++                search._write_day(store, body)
++                state['last_status'] = 'INDEXED' if payload is not None else str(reason)
++                _write_state(store, state)
++                return {'status': 'INDEXED' if payload is not None else 'PARTIAL', 'document_id': doc_id,
++                        'research_date': day, 'category': category, 'reason': reason,
++                        'retry_after': None if payload is not None else owner._iso(retry_at), **owner.SAFETY}
++            if scanned:
++                if scanned[-1] == ordered[-1]:
++                    state.update(phase='LARGE' if phase == 'SMALL' else 'SMALL', cursor_day='')
++                state['last_status'] = 'SEARCH_INDEX_DAY_UNREADABLE' if scan_error else 'SCAN_CONTINUES'
++                _write_state(store, state)
++            return {'status': 'SCAN_CONTINUES', 'phase': state['phase'], 'scanned_dates': len(scanned), **owner.SAFETY}
++    except (OSError, ValueError, TypeError, KeyError) as error:
++        reason = getattr(error, 'code', None) or str(error)
++        if not re.fullmatch(r'[A-Z0-9_]{1,80}', str(reason)):
++            reason = type(error).__name__.upper()
++        return {'status': 'CANNOT_CONFIRM', 'reason': reason, **owner.SAFETY}
+--- /dev/null
++++ b/infrastructure/zsxq_pdf_search_worker.py
+@@ -0,0 +1,142 @@
++"""Transient, read-only verifier used only by the existing PDF owner queue.
++
++It publishes nothing. The parent holds the PDF-owner lock and commits only a
++validated response. A kernel alarm limits a worker even if its parent dies.
++"""
++from __future__ import annotations
++
++import argparse
++import base64
++import hashlib
++import json
++import os
++import re
++import signal
++import sys
++from pathlib import Path
++
++MAX_INDEX_BYTES = 32 * 1024 * 1024
++GRAM_CACHE = 65536
++
++
++def _sha(path: Path) -> str:
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--data-root', required=True)
++    parser.add_argument('--document-id', required=True)
++    parser.add_argument('--fingerprint', required=True)
++    parser.add_argument('--owner-sha256', required=True)
++    parser.add_argument('--index-sha256', required=True)
++    parser.add_argument('--alarm-seconds', type=int, required=True)
++    parser.add_argument('--mode', choices=['FULL','SOURCE'], required=True)
++    args = parser.parse_args()
++    if not (1 <= args.alarm_seconds <= 12 and hasattr(signal, 'SIGALRM')):
++        return 2
++    signal.signal(signal.SIGALRM, signal.SIG_DFL)
++    signal.alarm(args.alarm_seconds)
++    try:
++        allowed_env = {'PATH', 'LANG', 'PYTHONNOUSERSITE', '__CF_USER_TEXT_ENCODING'}
++        if set(os.environ) - allowed_env:
++            raise ValueError('SEARCH_WORKER_ENVIRONMENT_INVALID')
++        app_root = Path(__file__).resolve().parent.parent
++        sys.path.insert(0, str(app_root))
++        import infrastructure.zsxq_pdf_ingestion as owner
++        import infrastructure.zsxq_pdf_search_index as search
++        if (Path(owner.__file__).resolve() != app_root/'infrastructure/zsxq_pdf_ingestion.py'
++                or Path(search.__file__).resolve() != app_root/'infrastructure/zsxq_pdf_search_index.py'
++                or _sha(Path(owner.__file__)) != args.owner_sha256
++                or _sha(Path(search.__file__)) != args.index_sha256
++                or not re.fullmatch(r'[0-9a-f]{64}', args.document_id)
++                or not re.fullmatch(r'[0-9a-f]{64}', args.fingerprint)):
++            raise ValueError('SEARCH_WORKER_IDENTITY_INVALID')
++        root = Path(args.data_root)
++        if not root.is_absolute() or not root.is_dir() or root.is_symlink():
++            raise ValueError('DATA_ROOT_INVALID')
++        class ReadOnlyCappedIO:
++            def __init__(self, root_path):
++                self.io = owner.SafeRoot(root_path)
++            def read_bytes(self, relative, *, max_bytes=64 * 1024 * 1024):
++                if relative == owner.STATE_RELATIVE:
++                    cap = MAX_INDEX_BYTES
++                elif '/pdfs/' in relative:
++                    cap = owner.MAX_PDF_BYTES
++                elif '/pages/' in relative:
++                    cap = 32 * 1024 * 1024
++                elif '/receipts/' in relative:
++                    cap = 2 * 1024 * 1024
++                else:
++                    cap = 16 * 1024 * 1024
++                return self.io.read_bytes(relative, max_bytes=min(max_bytes, cap))
++        class ReadOnlyCappedStore(owner.NativeDataStore):
++            def __init__(self, root_path):
++                super().__init__(root_path)
++                self._zsxq_pdf_io = ReadOnlyCappedIO(root_path)
++            def _read(self, relative):
++                return json.loads(self._zsxq_pdf_io.read_bytes(relative).decode('utf-8'))
++            def _write(self, *args, **kwargs):
++                raise ValueError('SEARCH_WORKER_WRITE_FORBIDDEN')
++        store = ReadOnlyCappedStore(root)
++        raw = owner._store_io(store).read_bytes(owner.STATE_RELATIVE, max_bytes=MAX_INDEX_BYTES)
++        index = json.loads(raw.decode('utf-8'))
++        if (not isinstance(index, dict) or index.get('schema_version') != 'v4.zsxq_pdf_ingestion_index.v1'
++                or any(not isinstance(index.get(key), dict) for key in ('sources', 'documents', 'ocr_cache'))):
++            raise ValueError('PROCESSING_INDEX_INVALID')
++        fingerprint, day, status = search._fingerprint(index, args.document_id)
++        if fingerprint != args.fingerprint or status != 'READY':
++            raise ValueError('SEARCH_WORKER_STALE')
++        if args.mode == 'SOURCE':
++            source, _ = owner._source_row_for_document(store, index, args.document_id)
++            print(json.dumps({'ok': True, 'document_id': args.document_id, 'research_date': day,
++                  'fingerprint': fingerprint, 'source_run_id': source.get('source_run_id')}, separators=(',', ':')), flush=True)
++            return 0
++        detail = owner._verified_document_detail(store, index, args.document_id, verify_pdf=True)
++        receipt, processing, source = detail['receipt'], detail['processing'], detail['source']
++        if (detail['status'] != 'READY' or receipt.get('integrity') != 'SOURCE_PDF_AND_PAGE_HASHES_VERIFIED'
++                or type(processing.get('verified_pdf_size')) is not int
++                or not 1 <= processing['verified_pdf_size'] <= owner.MAX_PDF_BYTES
++                or type(processing.get('verified_pages_size')) is not int
++                or not 1 <= processing['verified_pages_size'] <= 32 * 1024 * 1024
++                or not re.fullmatch(r'[0-9a-f]{64}', str(receipt.get('verified_pdf_sha256') or ''))
++                or not re.fullmatch(r'[0-9a-f]{64}', str(receipt.get('sha256') or ''))):
++            raise ValueError('SEARCH_WORKER_DETAIL_INVALID')
++        # Bound temporary bigram memory while preserving exactly the same bits.
++        bits = bytearray(search.BIT_BYTES)
++        grams: set[str] = set()
++        def flush() -> None:
++            for gram in grams:
++                for position in search._positions(gram):
++                    bits[position >> 3] |= 1 << (position & 7)
++            grams.clear()
++        segments = [str(source.get('topic_title') or ''), str(source.get('original_filename') or '')]
++        segments.extend(str(page.get('text') or '') for page in detail['pages'])
++        for segment in segments:
++            text = segment.casefold()
++            for i in range(len(text)-1):
++                grams.add(text[i:i+2])
++                if len(grams) >= GRAM_CACHE:
++                    flush()
++        flush()
++        result = {'ok': True, 'document_id': args.document_id, 'research_date': day,
++                  'fingerprint': fingerprint, 'source_run_id': source.get('source_run_id'),
++                  'verified_pdf_sha256': receipt['verified_pdf_sha256'],
++                  'verified_pdf_size': processing['verified_pdf_size'],
++                  'verified_pages_size': processing['verified_pages_size'],
++                  'receipt_sha256': receipt['sha256'], 'page_count': len(detail['pages']),
++                  'bloom': base64.b64encode(bits).decode('ascii')}
++        print(json.dumps(result, ensure_ascii=True, separators=(',', ':')), flush=True)
++        return 0
++    except Exception as error:
++        reason = getattr(error, 'code', None) or str(error)
++        if not re.fullmatch(r'[A-Z0-9_]{1,80}', str(reason)):
++            reason = type(error).__name__.upper()
++        print(json.dumps({'ok': False, 'reason': reason}, separators=(',', ':')), flush=True)
++        return 1
++    finally:
++        signal.alarm(0)
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())

@@ -1,0 +1,89 @@
+{
+  "schema_version": "v4_backend_patch_candidate.v1",
+  "status": "PASS_LOCAL_UNDEPLOYED_CANDIDATE_PENDING_DESTINATION_CONFIRMATION",
+  "source_receipt_status": "LOCAL_REVIEW_ONLY_NOT_PUBLISHED",
+  "isolated_apply_receipt_status": "PASS_ISOLATED_APPLY_AND_SHA",
+  "repository_target": "lexi2016/v4",
+  "target_branch": "research/panel-code-20261027",
+  "base_commit": "8cb5422b3d593cd8341550365368d98cf3c6c290",
+  "files": [
+    {
+      "path": "r5_api.patch",
+      "sha256": "ce4631bde9a1651e7a17725ec8673f3ee477f1dfba4da32685143f691d87b68c",
+      "bytes": 76208,
+      "targets": [
+        "apps/api/v35_api/research_lane_router.py",
+        "domains/related_pdf_cursor.py",
+        "domains/related_pdf_reports.py",
+        "infrastructure/zsxq_pdf_ingestion.py",
+        "infrastructure/zsxq_pdf_search_index.py"
+      ],
+      "preimage_sha256": {
+        "apps/api/v35_api/research_lane_router.py": "9f6003232e8dbd6f99a306d44cf2bc2a71bde206922777479bde19ef561db324",
+        "domains/related_pdf_cursor.py": null,
+        "domains/related_pdf_reports.py": null,
+        "infrastructure/zsxq_pdf_ingestion.py": "727a3f6cfcef626d6cf482eebf9e8d66418fcbe9817ae2e1dd1943c88e8384e0",
+        "infrastructure/zsxq_pdf_search_index.py": null
+      },
+      "result_sha256": {
+        "apps/api/v35_api/research_lane_router.py": "24ac4e01e58cae2c21e2f9c2eddc49e48f34d5434b919a1dccf4779b6666366c",
+        "domains/related_pdf_cursor.py": "37d35aeb9639b2bf3c3c914d5c72d13584bcb1e031094670c0e5d390b39cd4de",
+        "domains/related_pdf_reports.py": "6950e786e6776b1641ef07bb67c39fe3d14e9631cfb9d42aed0de278953e9dcd",
+        "infrastructure/zsxq_pdf_ingestion.py": "7398fc259253e49960ab9430993d27ad6f00686a3887b36d97d371b2ccded9ca",
+        "infrastructure/zsxq_pdf_search_index.py": "6183612b07bfd295004633d4c098e6893339319b1036ccf8ca9d9419dea34429"
+      },
+      "isolated_apply_status": "PASS"
+    },
+    {
+      "path": "r1_scheduler.patch",
+      "sha256": "d07a41a314f7af471848d779bd9a7a750be3277368abe8cd241ef77c80c5608c",
+      "bytes": 61992,
+      "targets": [
+        "infrastructure/zsxq_pdf_ingestion.py",
+        "infrastructure/zsxq_pdf_search_index.py",
+        "infrastructure/zsxq_pdf_search_maintenance.py",
+        "infrastructure/zsxq_pdf_search_worker.py"
+      ],
+      "preimage_sha256": {
+        "infrastructure/zsxq_pdf_ingestion.py": "cb00890b1f0d073fe67be8bde4b32357f8a3be88e41d7d88f22fe750c76aad16",
+        "infrastructure/zsxq_pdf_search_index.py": null,
+        "infrastructure/zsxq_pdf_search_maintenance.py": null,
+        "infrastructure/zsxq_pdf_search_worker.py": null
+      },
+      "result_sha256": {
+        "infrastructure/zsxq_pdf_ingestion.py": "f01f79c6c387e46bdfd4e36bf6e7e8a762cf982c3be598354163d4e932f7b4d4",
+        "infrastructure/zsxq_pdf_search_index.py": "6183612b07bfd295004633d4c098e6893339319b1036ccf8ca9d9419dea34429",
+        "infrastructure/zsxq_pdf_search_maintenance.py": "582c9d76517a24a33455d5502c8bce7daa3c686ed62830fcd34c4b4847a5b1b0",
+        "infrastructure/zsxq_pdf_search_worker.py": "e9762d1f9a91cc151f56a248879839114298480c019ddb8e67baf152d43e0f4c"
+      },
+      "isolated_apply_status": "PASS"
+    }
+  ],
+  "important_constraints": [
+    "The two patches are separately built candidates with overlapping target paths and distinct ingestion preimages; do not apply them to one checkout as a combined patch set.",
+    "No source checkout, receipt, report module duplicate, fixture, or real report/market data is included.",
+    "The source build receipt requires independent security review before any public upload.",
+    "No deployment, commit, push, or remote branch change occurred."
+  ],
+  "review_evidence": "Source-payload security review is complete for the local undeployed candidate. This review scope does not authorize public upload or deployment.",
+  "end_to_end": "CANNOT_CONFIRM",
+  "independent_security_review": {
+    "status": "PASS_LOCAL_UNDEPLOYED_CANDIDATE",
+    "reviewer": "github_scope_review",
+    "verdict": "PASS_LOCAL_UNDEPLOYED_CANDIDATE; BLOCK_PUBLICATION/DEPLOYMENT pending explicit authorization and runtime authorization/deployment evidence.",
+    "scope": "The four frozen code payloads and corrected candidate metadata were reviewed by the independent security Reviewer.",
+    "reviewed_payload_sha256": {
+      "patches/related-reports-ui.patch": "4f61f4d779613c4fd10435dbe34d6fde00fee5e42567dec53c5ff6deca325336",
+      "code-tree/sites/stock18-workflow/dist/related-reports.js": "7bcfb2eb00690149e0497211c73bcc03912c1088a0ab96206b9f0d05dc2696b5",
+      "v4-candidate/r5_api.patch": "ce4631bde9a1651e7a17725ec8673f3ee477f1dfba4da32685143f691d87b68c",
+      "v4-candidate/r1_scheduler.patch": "d07a41a314f7af471848d779bd9a7a750be3277368abe8cd241ef77c80c5608c"
+    },
+    "limits": "Review covers the local undeployed candidate only; it does not authorize public upload or deployment and does not validate combined backend patch behavior.",
+    "reviewed_prior_metadata_sha256": {
+      "VALIDATION.json": "6cc096c8bd4dda9f6df7a8b8066b544fd17fa096549992e04702fc6daafa33e2",
+      "v4-candidate/CANDIDATE_MANIFEST.json": "ac0750212aa4bbddc2b7d6608ae8fdc4bb31648f91a950c2f56f6e2850def183"
+    },
+    "reviewed_metadata_revision": "Hashes refer to the corrected metadata revision before recording the reviewer verdict; they are not hashes of this manifest revision."
+  },
+  "publication_destination_confirmation": "PENDING"
+}

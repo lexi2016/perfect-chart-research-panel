@@ -1,0 +1,1 @@
+window.STOCK_DATASET_CONFIG={kind:'breakout41',expectedStocks:41,dataUrl:'../breakout41_data.json',reviewUrl:'review41.json',chartBase:'../chartdata_breakout41/',showRetiredDefault:true,groups:[['BREAKOUT41_PATH_UNKNOWN','41只超高观察 · 路径待核']]};

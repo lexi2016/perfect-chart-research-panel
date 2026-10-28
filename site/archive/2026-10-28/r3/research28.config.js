@@ -1,0 +1,1 @@
+window.RESEARCH28_CONFIG={expectedStocks:20,dataUrl:'research28-assets/metadata.json',chartBase:'research28-assets/charts/',observationDate:'20261028',sourceDate:'20261027'};
