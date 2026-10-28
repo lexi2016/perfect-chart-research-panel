@@ -1,0 +1,35 @@
+{
+  "snapshot_date": "2026-10-28",
+  "scope": "additive source-only reader and workflow; not all code or production deployment",
+  "base_commit": "3c9a53b54d3a382efa416fe5eddb74c17db92d8c",
+  "files": [
+    {
+      "path": "research/reader-d27-v4/reader.py",
+      "source_path": "research_outputs/state_mother_reader_20261027/reader.py",
+      "sha256": "3ceb26ffb46061c38241b4be6aa5dc474bd77ff937aaa6920e1aa663df0f8074",
+      "bytes": 12977,
+      "git_blob_sha1": "ab8e45612ec353289d4ddc8464e45a0f435a1670"
+    },
+    {
+      "path": "research/reader-d27-v4/test_reader.py",
+      "source_path": "research_outputs/state_mother_reader_20261027/test_reader.py",
+      "sha256": "ec3b460418bd470df9b4a45649bb41b979f65476d2228208a8eda0053085be1d",
+      "bytes": 9930,
+      "git_blob_sha1": "eadb1a84f2be04c57709c197b0f19b278a4ed4f6"
+    },
+    {
+      "path": "research/SYNC_POLICY.md",
+      "source_path": "generated documentation",
+      "sha256": "569ccafcba21c8746d87c052cbe2b18dd48592dfadb653a607fbbd4d84112f1b",
+      "bytes": 1600,
+      "git_blob_sha1": "743d65f49511c958c66cbf226108b07e56d4c567"
+    },
+    {
+      "path": "research/reader-d27-v4/README.md",
+      "source_path": "generated documentation",
+      "sha256": "2c90fc8f8720eb0cc07591460c0f91b00861d5aeee8f01b4c0914d47e5031c9c",
+      "bytes": 1277,
+      "git_blob_sha1": "6be67c5473580a0ff79f6b142035855419144642"
+    }
+  ]
+}
