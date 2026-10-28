@@ -45,3 +45,9 @@ class CommandLine(unittest.TestCase):
   r=self.invoke(20261028);self.assertEqual(r.returncode,0);self.assertTrue(r.stdout.startswith('{'));self.assertEqual(json.loads(r.stdout)['status'],'VERIFIED_BASELINE_REPLAY')
  def test_future_cli_cannot_fake_run(self):
   r=self.invoke(20261029);self.assertEqual(r.returncode,2);self.assertIn('AWAITING_DATE_SPECIFIC_EXECUTION',r.stdout)
+
+class StrictBooleanReadiness(unittest.TestCase):
+ def test_same_day_string_false_not_ready(self):
+  c=Routes().base();c.update(target_date=20261028,history_same=False,complete_qfq_ready='false');self.assertEqual(workflow.route(c),'FULL_HISTORY_REQUIRED')
+ def test_same_day_integer_one_not_ready(self):
+  c=Routes().base();c.update(target_date=20261028,history_same=False,complete_qfq_ready=1);self.assertEqual(workflow.route(c),'FULL_HISTORY_REQUIRED')

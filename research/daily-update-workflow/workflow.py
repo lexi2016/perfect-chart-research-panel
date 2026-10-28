@@ -14,7 +14,7 @@ def route(c):
  if c['target_date']<c['baseline_date']:return 'REJECT_BEFORE_BASELINE'
  same=all(c[k] is True for k in ('source_same','history_same','formula_same','event_same'))
  if c['target_date']==c['baseline_date']:
-  return 'VERIFY_REUSE_EXISTING' if same and not c['new_effective_event'] else 'FULL_HISTORY_ORIGINAL_FORMULA' if c['complete_qfq_ready'] else 'FULL_HISTORY_REQUIRED'
+  return 'VERIFY_REUSE_EXISTING' if same and not c['new_effective_event'] else 'FULL_HISTORY_ORIGINAL_FORMULA' if c['complete_qfq_ready'] is True else 'FULL_HISTORY_REQUIRED'
  if c['previous_trade_date']!=c['baseline_date']:return 'UNKNOWN_DATE_GAP'
  if c['bar_present'] is not True:return 'UNKNOWN_MISSING_BAR'
  if same and not c['new_effective_event'] and c['state_ready'] is True:return 'STATE_APPEND'
