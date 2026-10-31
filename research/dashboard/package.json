@@ -1,0 +1,1 @@
+{"name":"registered-research-dashboard-export","version":"0.1.0","private":true,"type":"module","scripts":{"test":"node --test test/*.test.mjs","export":"node bin/export.mjs"},"dependencies":{"@napi-rs/canvas":"0.1.100"},"engines":{"node":">=22"}}
